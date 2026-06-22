@@ -1,6 +1,9 @@
-customtkinter
-pandas
-openpyxl
-xlrd
-pillow
-pyinstaller
+PySide6==6.11.1
+pandas==2.3.3
+openpyxl==3.1.5
+xlrd==2.0.2
+pillow==11.3.0
+pyinstaller==6.20.0
+
+# Dev / testing
+pytest==8.3.4

@@ -240,28 +240,36 @@ def process_price_update(price_path, clearance_path, inventory_path, store_id):
 
 def process_shipping(scan_path, inventory_path, template_path, doc_num):
     from openpyxl import load_workbook
+    from collections import Counter
     try:
         with open(scan_path, 'r', encoding='utf-8') as f:
-            scanned = {}
-            for line in f:
-                bc = normalize_barcode(line.strip())
-                if bc: scanned[bc] = scanned.get(bc, 0) + 1
-        if not scanned: return None
+            scanned_barcodes = [normalize_barcode(line.strip()) for line in f if line.strip()]
+        scanned_barcodes = [bc for bc in scanned_barcodes if bc]
+        if not scanned_barcodes:
+            return None
 
         df_inv = read_inventory(inventory_path)
-        df_inv['Barcode'] = df_inv['Barcode'].apply(normalize_barcode)
-        inv_data = df_inv.drop_duplicates('Barcode').set_index('Barcode').to_dict('index')
+        df_inv['Barcode_Norm'] = df_inv['Barcode'].apply(normalize_barcode)
+        bc_map = df_inv.drop_duplicates('Barcode_Norm').set_index('Barcode_Norm')[['ItemNo', 'Variant']].to_dict('index')
+
+        rows = Counter()
+        for bc in scanned_barcodes:
+            info = bc_map.get(bc)
+            if info:
+                key = (normalize_id(str(info['ItemNo'])), str(info.get('Variant', '')).strip())
+            else:
+                key = (bc, '')
+            rows[key] += 1
 
         wb = load_workbook(template_path)
         ws = wb.active
-        start_row, line_num = 2, 10000
-        for bc, qty in scanned.items():
-            item = inv_data.get(bc, {})
+        start_row, line_num = 4, 10000
+        for (article, variant), qty in rows.items():
             ws.cell(row=start_row, column=1, value=doc_num)
             ws.cell(row=start_row, column=2, value=line_num)
-            ws.cell(row=start_row, column=3, value=bc)
-            ws.cell(row=start_row, column=4, value=item.get('ItemNo', 'Unknown'))
-            ws.cell(row=start_row, column=5, value=qty)
+            ws.cell(row=start_row, column=3, value=article)
+            ws.cell(row=start_row, column=4, value=qty)
+            ws.cell(row=start_row, column=5, value=variant)
             start_row += 1
             line_num += 10000
         return wb

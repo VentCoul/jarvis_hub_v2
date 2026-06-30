@@ -23,27 +23,70 @@ def read_inventory(inventory_path):
     return pd.read_excel(xls, sheet_name=sheet_name, dtype=id_dtypes)
 
 def process_clearance_add(clearance_path, inventory_path, store_id, location_filter):
+    import logging, os
+    log_path = os.path.join(os.path.dirname(os.path.abspath(clearance_path)), "retail_hub_debug.log")
+    log = logging.getLogger("clearance_add")
+    if not log.handlers:
+        fh = logging.FileHandler(log_path, encoding='utf-8')
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        log.addHandler(fh)
+        log.setLevel(logging.DEBUG)
     try:
+        log.info(f"START store={store_id!r} loc={location_filter!r}")
+        log.info(f"  clr={clearance_path}")
+        log.info(f"  inv={inventory_path}")
+
         df_clr = pd.read_excel(clearance_path)
+        log.info(f"  clr columns: {df_clr.columns.tolist()}")
         store_col = detect_column(df_clr, 'store')
         article_col = detect_column(df_clr, 'article')
+        log.info(f"  clr store_col={store_col!r} article_col={article_col!r}")
         df_clr[article_col] = df_clr[article_col].astype(str).str.strip().str.lstrip('0')
-        mask = df_clr[store_col].astype(str) == str(store_id)
+        mask = df_clr[store_col].astype(str).str.strip() == str(store_id).strip()
         target_articles = set(df_clr[mask][article_col].unique())
-        
+        log.info(f"  target_articles count={len(target_articles)}, sample={list(target_articles)[:5]}")
+
+        if not target_articles:
+            log.warning("  No articles found for store — returning []")
+            return []
+
         df_inv = read_inventory(inventory_path)
-        df_inv['ItemNo'] = df_inv['ItemNo'].apply(normalize_id)
-        df_inv['Barcode'] = df_inv['Barcode'].apply(normalize_barcode)
-        matched = df_inv[df_inv['ItemNo'].isin(target_articles)].copy()
+        log.info(f"  inv columns: {df_inv.columns.tolist()}")
+
+        art_col_inv = detect_column(df_inv, 'article')
+        bc_col_inv = detect_column(df_inv, 'barcode')
+        qty_col_inv = detect_column(df_inv, 'quantity')
+        log.info(f"  inv art={art_col_inv!r} bc={bc_col_inv!r} qty={qty_col_inv!r}")
+
+        df_inv[art_col_inv] = df_inv[art_col_inv].apply(normalize_id)
+        df_inv[bc_col_inv] = df_inv[bc_col_inv].apply(normalize_barcode)
+        matched = df_inv[df_inv[art_col_inv].isin(target_articles)].copy()
+        log.info(f"  matched rows before loc filter: {len(matched)}")
 
         if location_filter != "Загальна":
-            matched = matched[matched['Location'].str.contains(location_filter, case=False, na=False)]
+            loc_col = next((c for c in matched.columns
+                            if any(x in str(c).lower() for x in ['location', 'локація'])), None)
+            if loc_col:
+                matched = matched[matched[loc_col].astype(str).str.contains(location_filter, case=False, na=False)]
+            log.info(f"  matched rows after loc filter ({location_filter!r}): {len(matched)}")
 
-        if matched.empty: return []
+        if matched.empty:
+            log.info("  matched is empty — returning []")
+            return []
 
-        final = matched.groupby('Barcode')['TotalQuantity'].sum().reset_index()
-        return [f"{r['Barcode']};{int(r['TotalQuantity'])}" for _, r in final[final['TotalQuantity'] > 0].iterrows()]
-    except Exception as e: raise RuntimeError(f"Clearance Error: {e}")
+        qty_vals = pd.to_numeric(matched[qty_col_inv], errors='coerce').fillna(0)
+        matched = matched.copy()
+        matched['_qty'] = qty_vals
+        final = matched.groupby(bc_col_inv)['_qty'].sum().reset_index()
+        final = final[final['_qty'] > 0]
+        log.info(f"  final barcodes with qty>0: {len(final)}")
+
+        result = [f"{r[bc_col_inv]};{int(r['_qty'])}" for _, r in final.iterrows()]
+        log.info(f"  DONE result count={len(result)}")
+        return result
+    except Exception as e:
+        log.exception(f"Clearance Error: {e}")
+        raise RuntimeError(f"Clearance Error: {e}")
 
 def process_missed_items(inventory_path, division_filter, gender_filter):
     """

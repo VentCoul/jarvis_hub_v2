@@ -1,7 +1,10 @@
 import pandas as pd
 import pytest
 from openpyxl import Workbook
-from modules.logic import process_clearance_add, process_movement
+from modules.logic import (
+    process_clearance_add, process_movement,
+    process_price_update, process_shipping,
+)
 
 
 @pytest.fixture
@@ -81,3 +84,72 @@ def test_leading_zero_preserved_end_to_end(tmp_path, clearance_file):
 
     out = process_clearance_add(clearance_file, str(inv), "5", "Загальна")
     assert out == ["0123456789012;3"]
+
+
+@pytest.fixture
+def clearance_file_float(tmp_path):
+    """Clearance with a blank Item cell — pandas reads the whole Item column as
+    float64, so '123' arrives as 123.0. Regression for the silent-empty bug."""
+    path = tmp_path / "clearance_float.xlsx"
+    pd.DataFrame({
+        "# Mall": [5, 5, 9],
+        "Item": [123, None, 999],
+    }).to_excel(path, index=False)
+    return str(path)
+
+
+def test_clearance_matches_float_read_articles(clearance_file_float, inventory_file):
+    """A float-read clearance article (123.0) must still match inventory '123'."""
+    out = process_clearance_add(clearance_file_float, inventory_file, "5", "Загальна")
+    assert out == ["4820001234567;3"]
+
+
+def test_movement_matches_float_read_articles(clearance_file_float, inventory_file, scan_file):
+    """Promo classification must survive a float-read clearance article column."""
+    promo, regular, _ = process_movement(clearance_file_float, inventory_file, scan_file, "5")
+    assert promo == ["4820001234567;2"]
+    assert regular == ["4820009876543;1"]
+
+
+def _alt_inventory(tmp_path):
+    """Inventory using the alternative (but supported) column names:
+    Article/EAN/Qty/Size instead of ItemNo/Barcode/TotalQuantity/Variant."""
+    path = tmp_path / "inv_alt.xlsx"
+    pd.DataFrame({
+        "Article": ["123", "456"],
+        "EAN": ["4820001234567", "4820009876543"],
+        "Qty": [3, 2],
+        "Size": ["M", "L"],
+    }).to_excel(path, index=False)
+    return str(path)
+
+
+def test_price_update_accepts_alternative_columns(tmp_path, clearance_file):
+    """Переоцінка must honour alternative inventory headers via detect_column."""
+    inv = _alt_inventory(tmp_path)
+    price = tmp_path / "price.xlsx"
+    pd.DataFrame({"Article": ["123", "456"]}).to_excel(price, index=False)
+
+    promo, reg, total, found = process_price_update(str(price), clearance_file, inv, "5")
+    assert total == 2
+    assert found == 2
+    assert promo == ["4820001234567;3"]   # 123 is promo for store 5
+    assert reg == ["4820009876543;2"]      # 456 is regular
+
+
+def test_shipping_accepts_alternative_columns(tmp_path):
+    """Відправка must honour alternative inventory headers via detect_column."""
+    inv = _alt_inventory(tmp_path)
+    scan = tmp_path / "scan.txt"
+    scan.write_text("4820001234567\n4820001234567\n", encoding="utf-8")
+
+    tmpl = tmp_path / "tmpl.xlsx"
+    wb0 = Workbook(); wb0.active.append(["hdr"]); wb0.save(tmpl)
+
+    wb = process_shipping(str(scan), inv, str(tmpl), "ПЕР001")
+    ws = wb.active
+    # Row 4 = first data row: doc, line, article(123), qty(2), variant(M)
+    assert ws.cell(row=4, column=1).value == "ПЕР001"
+    assert ws.cell(row=4, column=3).value == "123"
+    assert ws.cell(row=4, column=4).value == 2
+    assert ws.cell(row=4, column=5).value == "M"

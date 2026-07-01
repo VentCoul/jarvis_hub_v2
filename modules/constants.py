@@ -9,6 +9,7 @@ COLUMN_MAPPING = {
     'article': ['Item', 'Article', 'Артикул', 'ItemNo', 'Parent_Item'],
     'barcode': ['Barcode', 'Штрих-код', 'EAN'],
     'quantity': ['TotalQuantity', 'Qty', 'Кількість', 'Current_Inventory'],
+    'variant': ['Variant', 'Size', 'Розмір'],
     'division': ['Division_Description', 'Division', 'Дивізіон'],
     'gender': ['Gender', 'Стать']
 }

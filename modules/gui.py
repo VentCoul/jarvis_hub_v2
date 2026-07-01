@@ -730,7 +730,7 @@ def build_clearance_wizard(parent_stack, results_page, app):
             loc_data = data
             loc_name = loc
             actions.append((f"{loc} ({len(data)})", "tint_clearance", "mod_clearance",
-                            lambda d=loc_data, l=loc_name: _save_lines(results_page, d, f"Кліренс_{st}_{l}.txt")))
+                            lambda _checked=False, d=loc_data, l=loc_name: _save_lines(results_page, d, f"Кліренс_{st}_{l}.txt")))
         results_page.show_results(
             f"⚡ Кліренс — {st}",
             f"Оброблено {total} позицій",

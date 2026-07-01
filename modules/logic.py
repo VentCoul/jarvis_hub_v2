@@ -41,7 +41,9 @@ def process_clearance_add(clearance_path, inventory_path, store_id, location_fil
         store_col = detect_column(df_clr, 'store')
         article_col = detect_column(df_clr, 'article')
         log.info(f"  clr store_col={store_col!r} article_col={article_col!r}")
-        df_clr[article_col] = df_clr[article_col].astype(str).str.strip().str.lstrip('0')
+        # Use normalize_id (not a bare lstrip) so articles match the inventory
+        # side even when pandas reads the column as float (e.g. "123" -> 123.0).
+        df_clr[article_col] = df_clr[article_col].apply(normalize_id)
         mask = df_clr[store_col].astype(str).str.strip() == str(store_id).strip()
         target_articles = set(df_clr[mask][article_col].unique())
         log.info(f"  target_articles count={len(target_articles)}, sample={list(target_articles)[:5]}")
@@ -163,8 +165,9 @@ def process_movement(clearance_path, inventory_path, scan_path, store_id):
         cl_art_col = detect_column(df_clr, 'article')
         cl_st_col = detect_column(df_clr, 'store')
         
-        # Filter by store and normalize articles
-        df_clr[cl_art_col] = df_clr[cl_art_col].astype(str).str.strip().str.lstrip('0')
+        # Filter by store and normalize articles (normalize_id keeps clearance
+        # articles consistent with the inventory side, incl. float-read columns).
+        df_clr[cl_art_col] = df_clr[cl_art_col].apply(normalize_id)
         promo_arts = set(df_clr[df_clr[cl_st_col].astype(str) == str(store_id)][cl_art_col].unique())
 
         # 2. Load Inventory to get Barcode -> Article mapping
@@ -253,12 +256,16 @@ def process_price_update(price_path, clearance_path, inventory_path, store_id):
         df_clr = pd.read_excel(clearance_path)
         art_col_clr = detect_column(df_clr, 'article')
         st_col_clr = detect_column(df_clr, 'store')
-        df_clr[art_col_clr] = df_clr[art_col_clr].astype(str).str.strip().str.lstrip('0')
+        df_clr[art_col_clr] = df_clr[art_col_clr].apply(normalize_id)
         promo_arts = set(df_clr[df_clr[st_col_clr].astype(str) == str(store_id)][art_col_clr].unique())
 
         df_inv = read_inventory(inventory_path)
-        df_inv['ItemNo_Norm'] = df_inv['ItemNo'].apply(normalize_id)
-        df_inv['Barcode_Norm'] = df_inv['Barcode'].apply(normalize_barcode)
+        inv_art_col = detect_column(df_inv, 'article')
+        inv_bc_col = detect_column(df_inv, 'barcode')
+        inv_qty_col = detect_column(df_inv, 'quantity')
+        df_inv['ItemNo_Norm'] = df_inv[inv_art_col].apply(normalize_id)
+        df_inv['Barcode_Norm'] = df_inv[inv_bc_col].apply(normalize_barcode)
+        df_inv['_qty'] = pd.to_numeric(df_inv[inv_qty_col], errors='coerce').fillna(0)
 
         inv_col = 'Barcode_Norm' if is_barcode else 'ItemNo_Norm'
         matched_inv = df_inv[df_inv[inv_col].isin(target_ids)].copy()
@@ -266,13 +273,13 @@ def process_price_update(price_path, clearance_path, inventory_path, store_id):
         if matched_inv.empty:
             return [], [], total_in_price, 0
 
-        final = matched_inv.groupby(['Barcode_Norm', 'ItemNo_Norm'])['TotalQuantity'].sum().reset_index()
-        final = final[final['TotalQuantity'] > 0]
+        final = matched_inv.groupby(['Barcode_Norm', 'ItemNo_Norm'])['_qty'].sum().reset_index()
+        final = final[final['_qty'] > 0]
         found_arts = len(final['ItemNo_Norm'].unique())
 
         promo, reg = [], []
         for _, row in final.iterrows():
-            line = f"{row['Barcode_Norm']};{int(row['TotalQuantity'])}"
+            line = f"{row['Barcode_Norm']};{int(row['_qty'])}"
             if row['ItemNo_Norm'] in promo_arts:
                 promo.append(line)
             else:
@@ -292,14 +299,17 @@ def process_shipping(scan_path, inventory_path, template_path, doc_num):
             return None
 
         df_inv = read_inventory(inventory_path)
-        df_inv['Barcode_Norm'] = df_inv['Barcode'].apply(normalize_barcode)
-        bc_map = df_inv.drop_duplicates('Barcode_Norm').set_index('Barcode_Norm')[['ItemNo', 'Variant']].to_dict('index')
+        inv_bc_col = detect_column(df_inv, 'barcode')
+        inv_art_col = detect_column(df_inv, 'article')
+        inv_var_col = detect_column(df_inv, 'variant')
+        df_inv['Barcode_Norm'] = df_inv[inv_bc_col].apply(normalize_barcode)
+        bc_map = df_inv.drop_duplicates('Barcode_Norm').set_index('Barcode_Norm')[[inv_art_col, inv_var_col]].to_dict('index')
 
         rows = Counter()
         for bc in scanned_barcodes:
             info = bc_map.get(bc)
             if info:
-                key = (normalize_id(str(info['ItemNo'])), str(info.get('Variant', '')).strip())
+                key = (normalize_id(str(info[inv_art_col])), str(info.get(inv_var_col, '')).strip())
             else:
                 key = (bc, '')
             rows[key] += 1

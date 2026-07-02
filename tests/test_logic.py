@@ -138,7 +138,10 @@ def test_price_update_accepts_alternative_columns(tmp_path, clearance_file):
 
 
 def test_shipping_accepts_alternative_columns(tmp_path):
-    """Відправка must honour alternative inventory headers via detect_column."""
+    """Відправка must honour alternative inventory headers via detect_column.
+    Plain template (no XML map) -> openpyxl fallback path, returns bytes."""
+    import io
+    from openpyxl import load_workbook
     inv = _alt_inventory(tmp_path)
     scan = tmp_path / "scan.txt"
     scan.write_text("4820001234567\n4820001234567\n", encoding="utf-8")
@@ -146,10 +149,98 @@ def test_shipping_accepts_alternative_columns(tmp_path):
     tmpl = tmp_path / "tmpl.xlsx"
     wb0 = Workbook(); wb0.active.append(["hdr"]); wb0.save(tmpl)
 
-    wb = process_shipping(str(scan), inv, str(tmpl), "ПЕР001")
-    ws = wb.active
+    data = process_shipping(str(scan), inv, str(tmpl), "ПЕР001")
+    assert isinstance(data, (bytes, bytearray))
+    ws = load_workbook(io.BytesIO(data)).active
     # Row 4 = first data row: doc, line, article(123), qty(2), variant(M)
     assert ws.cell(row=4, column=1).value == "ПЕР001"
     assert ws.cell(row=4, column=3).value == "123"
     assert ws.cell(row=4, column=4).value == 2
     assert ws.cell(row=4, column=5).value == "M"
+
+
+def test_shipping_preserves_xml_map(tmp_path):
+    """When the template carries a BC XML map, the output must keep it (and the
+    single-cell mappings) so LS Central accepts the import."""
+    import io, zipfile
+    from openpyxl import load_workbook
+
+    # Minimal template mimicking the LS Central export: xmlMaps + an xml table.
+    tmpl = tmp_path / "bc_tmpl.xlsx"
+    _write_xml_map_template(str(tmpl))
+
+    inv = _alt_inventory(tmp_path)
+    scan = tmp_path / "scan.txt"
+    scan.write_text("4820001234567\n4820001234567\n4820009876543\n", encoding="utf-8")
+
+    data = process_shipping(str(scan), inv, str(tmpl), "ПЕР005")
+    assert isinstance(data, (bytes, bytearray))
+
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        names = z.namelist()
+        assert "xl/xmlMaps.xml" in names          # map survived
+        assert "xl/tables/table1.xml" in names
+        table = z.read("xl/tables/table1.xml").decode("utf-8")
+    # 2 unique items -> rows 4 and 5 -> table range grows to A3:E5
+    assert 'ref="A3:E5"' in table
+
+    ws = load_workbook(io.BytesIO(data)).active
+    assert ws["A4"].value == "ПЕР005"
+    assert ws["C4"].value == "123"
+    assert ws["D4"].value == "2"
+    assert ws["C5"].value == "456"
+
+
+def _write_xml_map_template(path):
+    """Build a tiny .xlsx that contains an XML map + xml-typed table, matching
+    the shape LS Central exports (header row 3, placeholder data row 4)."""
+    import zipfile
+    ns = 'xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    sheet = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        f'<x:worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" {ns}>'
+        '<x:sheetData>'
+        '<x:row r="3"><x:c r="A3" t="inlineStr"><x:is><x:t>Номер документу</x:t></x:is></x:c></x:row>'
+        '<x:row r="4"><x:c r="A4" t="inlineStr"><x:is><x:t></x:t></x:is></x:c></x:row>'
+        '</x:sheetData></x:worksheet>'
+    )
+    table = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        f'<x:table id="5" name="Table5" displayName="Table5" ref="A3:E4" tableType="xml" {ns}>'
+        '<x:autoFilter ref="A3:E4" /><x:tableColumns count="5">'
+        '<x:tableColumn id="1" name="Номер документу" /></x:tableColumns></x:table>'
+    )
+    ct = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '</Types>'
+    )
+    styles = ('<?xml version="1.0" encoding="UTF-8"?>'
+              f'<x:styleSheet {ns}><x:cellXfs count="2">'
+              '<x:xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
+              '<x:xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
+              '</x:cellXfs></x:styleSheet>')
+    rels = ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+    wb = ('<?xml version="1.0" encoding="UTF-8"?>'
+          f'<x:workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" {ns}>'
+          '<x:sheets><x:sheet name="Sheet1" sheetId="1" r:id="rId1"/></x:sheets></x:workbook>')
+    wb_rels = ('<?xml version="1.0" encoding="UTF-8"?>'
+               '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+               '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+               '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("xl/workbook.xml", wb)
+        z.writestr("xl/_rels/workbook.xml.rels", wb_rels)
+        z.writestr("xl/worksheets/sheet1.xml", sheet)
+        z.writestr("xl/styles.xml", styles)
+        z.writestr("xl/tables/table1.xml", table)
+        z.writestr("xl/xmlMaps.xml", '<?xml version="1.0"?><MapInfo/>')

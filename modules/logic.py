@@ -288,9 +288,85 @@ def process_price_update(price_path, clearance_path, inventory_path, store_id):
         return promo, reg, total_in_price, found_arts
     except Exception as e: raise RuntimeError(f"Price Update Error: {e}")
 
+def _fill_xml_map_template(template_path, data_rows):
+    """
+    Fill an LS Central / Business Central config-package template that carries an
+    embedded XML map, WITHOUT destroying that map.
+
+    openpyxl silently drops xl/xmlMaps.xml, the single-cell mappings and the
+    connections part on save, which makes BC reject the file with
+    "Книга Excel повинна містити карту XML". So instead of re-saving via
+    openpyxl we edit the .xlsx zip in place: inject the data rows into the
+    worksheet, grow the mapped table's range, and copy every other part byte
+    for byte.
+
+    Header lives on row 3, data starts on row 4 (columns A..E:
+    DocumentNo, LineNo, ItemNo, Quantity, VariantCode).
+
+    Returns the finished workbook as bytes, or None if the template has no XML
+    map (caller falls back to the plain openpyxl path).
+    """
+    import zipfile, io, re
+    from xml.sax.saxutils import escape
+
+    with zipfile.ZipFile(template_path, 'r') as zin:
+        names = zin.namelist()
+        contents = {n: zin.read(n) for n in names}
+
+    if 'xl/xmlMaps.xml' not in contents:
+        return None
+
+    sheet_name = next((n for n in names
+                       if re.match(r'xl/worksheets/sheet\d+\.xml$', n)), None)
+    table_name = next((n for n in names
+                       if re.match(r'xl/tables/table\d+\.xml$', n)
+                       and b'tableType="xml"' in contents[n]), None)
+    if not sheet_name or not table_name:
+        return None
+
+    START = 4          # first data row (row 3 is the header)
+    cols = ['A', 'B', 'C', 'D', 'E']
+
+    def cell(col, r, val):
+        text = escape('' if val is None else str(val))
+        return (f'<x:c r="{col}{r}" s="1" t="inlineStr"><x:is>'
+                f'<x:t xml:space="preserve">{text}</x:t></x:is></x:c>')
+
+    rows_xml = []
+    for i, vals in enumerate(data_rows):
+        r = START + i
+        cells = ''.join(cell(cols[j], r, vals[j]) for j in range(5))
+        rows_xml.append(f'<x:row r="{r}">{cells}</x:row>')
+    rows_blob = ''.join(rows_xml)
+
+    sheet = contents[sheet_name].decode('utf-8')
+    # Drop the template's placeholder data rows (r >= 4); keep header rows.
+    sheet = re.sub(
+        r'<x:row r="(\d+)"[^>]*>.*?</x:row>',
+        lambda m: '' if int(m.group(1)) >= START else m.group(0),
+        sheet, flags=re.S,
+    )
+    sheet = sheet.replace('</x:sheetData>', rows_blob + '</x:sheetData>')
+    contents[sheet_name] = sheet.encode('utf-8')
+
+    # Grow the mapped table (and its autofilter) to cover the new rows.
+    last = START + len(data_rows) - 1
+    table = contents[table_name].decode('utf-8')
+    table = re.sub(r'(ref=")([A-Z]+)3:([A-Z]+)\d+(")',
+                   rf'\g<1>\g<2>3:\g<3>{last}\g<4>', table)
+    contents[table_name] = table.encode('utf-8')
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for n in names:
+            zout.writestr(n, contents[n])
+    return buf.getvalue()
+
+
 def process_shipping(scan_path, inventory_path, template_path, doc_num):
     from openpyxl import load_workbook
     from collections import Counter
+    import io
     try:
         with open(scan_path, 'r', encoding='utf-8') as f:
             scanned_barcodes = [normalize_barcode(line.strip()) for line in f if line.strip()]
@@ -314,16 +390,30 @@ def process_shipping(scan_path, inventory_path, template_path, doc_num):
                 key = (bc, '')
             rows[key] += 1
 
+        # Build the ordered data rows: (DocumentNo, LineNo, ItemNo, Qty, Variant)
+        data_rows = []
+        line_num = 10000
+        for (article, variant), qty in rows.items():
+            data_rows.append((doc_num, line_num, article, qty, variant))
+            line_num += 10000
+
+        # Preferred path: template carries a BC XML map — preserve it.
+        filled = _fill_xml_map_template(template_path, data_rows)
+        if filled is not None:
+            return filled
+
+        # Fallback: plain template without an XML map — use openpyxl.
         wb = load_workbook(template_path)
         ws = wb.active
-        start_row, line_num = 4, 10000
-        for (article, variant), qty in rows.items():
-            ws.cell(row=start_row, column=1, value=doc_num)
-            ws.cell(row=start_row, column=2, value=line_num)
+        start_row = 4
+        for doc, ln, article, qty, variant in data_rows:
+            ws.cell(row=start_row, column=1, value=doc)
+            ws.cell(row=start_row, column=2, value=ln)
             ws.cell(row=start_row, column=3, value=article)
             ws.cell(row=start_row, column=4, value=qty)
             ws.cell(row=start_row, column=5, value=variant)
             start_row += 1
-            line_num += 10000
-        return wb
+        out = io.BytesIO()
+        wb.save(out)
+        return out.getvalue()
     except Exception as e: raise RuntimeError(f"Shipping Error: {e}")

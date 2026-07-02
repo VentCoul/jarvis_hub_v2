@@ -581,10 +581,13 @@ def _save_excel(parent, df, filename):
             pass
 
 
-def _save_workbook(parent, wb, filename):
+def _save_workbook(parent, data, filename):
     path, _ = QFileDialog.getSaveFileName(parent, "Зберегти", filename, "Excel files (*.xlsx)")
     if path:
-        wb.save(path)
+        # process_shipping returns the finished workbook as raw bytes so that the
+        # BC XML map survives (openpyxl would strip it).
+        with open(path, 'wb') as f:
+            f.write(data)
         QMessageBox.information(parent, "Готово", f"Збережено: {os.path.basename(path)}")
 
 
